@@ -1,0 +1,326 @@
+#!/usr/bin/env python3
+
+#Re=312, Q=1200 ml/h, j=450 mA/cm3, bubble_nucleation_size=101 um
+import aphros
+import numpy as np
+
+class Default(aphros.Parameters):
+        #Parameters
+        _w=1e-3 #m
+        _h=1e-3 #m
+        _l=16e-3 #m
+        _lelec=10e-3 #m
+
+        _rho_l=998.2 #kg/m3
+        _mu_l=0.001003 #Pa.s
+        _rho_g=0.08189 #kg/m3
+        _mu_g=1.919e-5 #Pa.s
+        _sigma=0.072 #N/m
+        _Q=1200/60 #ml/min
+
+        _j=450 #mA/cm2
+        _M_h2=2 #g/mol
+        _F=96485.3321 #sA/mol
+        _z=2
+
+        _re_gen=10e-6 # reference bubble size for generation
+
+
+        dim=3
+        nproc=256
+        nx=512
+        bs=8
+
+        dump_n=200
+
+        onsurface_generation=1
+
+        #electrical
+        _resist1=1/26 #ohm.m #this is for 1M sulfuric acid
+        _resist2=1 #ohm.m
+        enable_electro=1
+
+        #cfl viscosity
+        cflvis0=0.01
+        cfl_reQ=300/60 #ml/min
+        cflvis=cflvis0*cfl_reQ/_Q
+
+        #init_bubble
+        init_bubble=False
+        
+
+def tune(par):
+
+        par._Q=par._Q*1e-6/60 #m3/s
+
+        par._v=par._Q/par._h/par._w #m/s
+        par._D_h=4*par._h*par._w/(2*(par._h+par._w)) #m
+
+
+        par._I=par._j*par._h*par._lelec*1e4 #mA
+        # _rho_g is gas density
+        par._v_dot_h2=par._I*par._M_h2/(par._F*par._z*par._rho_g)*1e-6 #m3/s
+
+        par._ngen=par._v_dot_h2/(np.pi*4/3*par._re_gen*par._re_gen*par._re_gen) # 1/s bubble generation per second
+
+        #references
+        par._RHO=par._rho_l #kg/m3
+        par._L=par._D_h #m
+        par._V=par._v #m/s
+        par._MU=par._RHO*par._L*par._V #Pa.s
+        par._SIGMA=par._V*par._MU #N/m
+        par._T=par._L/par._V #s
+
+        #dimensionless parameters
+        par.sigma=par._sigma/par._SIGMA
+        
+        par.rho1=par._rho_l/par._RHO
+        par.mu1=par._mu_l/par._MU
+        par.rho2=max(par._rho_g/par._RHO,0.01*par.rho1)
+        par.mu2=par._mu_g/par._MU
+
+
+        par.h=par._h/par._L
+        par.w=par._w/par._L
+        par.l=par._l/par._L
+        par.lelec=par._lelec/par._L
+
+        par.v=par._v/par._V
+
+        par.capillary=par.mu1*par.v/par.sigma
+        if(par.capillary<0.005):
+        	print("capillary=",par.capillary)
+        	par.sigma=par.mu1*par.v/0.01
+
+        #bubble generation region
+        par.hy=par.w/3
+        par.hx=par.lelec
+        par.hz=par.h
+        par.r_bubble=0.16*par.h/2 *np.power(2,1/3) #Bubble nucleation radius
+        par.rmin=par.r_bubble/2.1
+
+        par.bubgen_dt=1/par._ngen/par._T/((par._re_gen/par._L/par.r_bubble)*(par._re_gen/par._L/par.r_bubble)*(par._re_gen/par._L/par.r_bubble))
+        par.dump_field_dt=max(par.bubgen_dt*0.5,0.05)
+
+
+        #number of bubble generations
+        par.tmax=1500.0
+
+        #dimensionless current
+        par.resist1=par._resist1/par._L
+        par.resist2=par._resist2/par._L
+
+        # Initial number of bubbles in the domain
+        #ratio=bubble_genration_rate/flow_rate
+        #n=ratio*lelec*A/bubble_volume
+        if(par.init_bubble):
+                par.n_init_bub=int(np.floor(par.lelec/par.bubgen_dt/par.v)+1)
+        else:
+                par.n_init_bub=0
+
+        return(par)
+
+
+
+par=Default("par.py")
+par=tune(par)
+
+
+lx=par.l
+ly=par.w
+lz=par.h
+
+
+
+domain = aphros.AdjustedDomain(lx=lx,
+                               ly=ly,
+                               lz=lz,
+                               nx=par.nx,
+                               nproc=par.nproc,
+                               bsy=par.bs*2,
+                               bsz=par.bs*2,
+                               bsx=par.bs)
+
+
+#-----------------------
+#prevent bc bugs
+lx=domain.lx+domain.h/2
+ly=domain.ly+domain.h/2
+lz=domain.lz
+domain = aphros.AdjustedDomain(lx=lx,
+                               ly=ly,
+                               lz=lz,
+                               nx=par.nx,
+                               nproc=par.nproc,
+                               bsy=par.bs*2,
+                               bsz=par.bs*2,
+                               bsx=par.bs)
+
+#-----------------------
+
+lx=domain.lx
+ly=domain.ly
+lz=domain.lz
+print(domain.nx,domain.ny,domain.nz)
+
+inf=max(lx,ly,lz)*10
+
+# offset: ratio 
+offset=0.1
+
+##########
+#geometry
+gm=aphros.Geometry()
+
+ocord=[0,ly/2,0]
+
+
+offlen=lx-(par.l-par.lelec*(offset/2))
+gm.Box(center=[(lx-offlen)/2,ly/2,0],halfsize=[(lx-offlen)/2,par.w/2,lz])
+gm.Box(center=[lx-offlen/2,4*ly/5,0],halfsize=[offlen,par.w/5,lz])
+gm.Box(center=[lx-offlen/2,ly/5,0],halfsize=[offlen,par.w/5,lz])
+
+bpath="body.dat"
+gm.GenerateFile(bpath)
+
+
+##########
+#conf file
+conf=aphros.Config()
+conf.extent=max(lx,ly,lz)
+conf.rmin=par.rmin
+conf.rho1=par.rho1
+conf.mu1=par.mu1
+conf.rho2=par.rho2
+conf.mu2=par.mu2
+conf.sigma=par.sigma
+conf.dump_field_dt=par.dump_field_dt
+conf.tmax=par.tmax
+conf.cflvis=par.cflvis
+conf.GenerateFile("par.conf")
+
+##########
+#bc
+bc=aphros.BoundaryConditions()
+
+
+extra0=""
+extra1=", tracer0_neumann 0, tracer1_neumann 0"
+extra2=", tracer0_neumann 0, tracer1_neumann 0"
+if(par.enable_electro==1):
+        extra1+=", electro_neumann {:0.6f}".format(par._I*1e-3)
+        extra2+=", electro_dirichlet {:0.6f}".format(0)
+        extra0+=", electro_neumann {:0.6f}".format(0)
+
+bc.Wall(aphros.Geometry().Box([0,0,0],[inf,inf,inf]),extra=extra0)
+
+bc.Wall(aphros.Geometry().Box([par.l-par.lelec/2*(1+offset),ly/2+par.w/2,0],[par.lelec/2,1e-2,lz]),extra=extra1)  #1278 
+bc.Wall(aphros.Geometry().Box([par.l-par.lelec/2*(1+offset),ly/2-par.w/2,0],[par.lelec/2,1e-2,lz]),extra=extra2)  #1278
+
+#bc.OutletPressure(aphros.Geometry().Box([lx,0,0],[1e-4,inf,inf]),1,extra=", electro_dirichlet {:0.6f}".format(0))
+#bc.Outlet(aphros.Geometry().Box([lx,0,0],[1e-4,inf,inf]),extra=", electro_dirichlet {:0.6f}".format(0))
+
+bc.Outlet(aphros.Geometry().Box([lx,0,0],[1e-4,inf,inf]),extra=extra0)
+
+#bc.Inlet(aphros.Geometry().Box([0,0,0],[1e-4,inf,inf]),velocity=[par.v,0,0],extra=", electro_dirichlet {:0.6f}".format(0))
+bc.Inlet(aphros.Geometry().Box([0,0,0],[1e-4,inf,inf]),velocity=[par.v,0,0],extra=extra0)
+bc.GenerateFile("bc.dat")
+
+##########
+#par.make
+
+with open("par.make", 'w') as f:
+    f.write('''m = {nx} {ny} {nz}
+bs = {bsx} {bsy} {bsz}
+np = {nproc}\n'''.format(**vars(domain)))
+
+
+##########
+#bubgen
+
+file=open("bubgen.conf","w")
+enable_bubgen_seq=1
+bubgen_t0=0.05
+bubgen_dt=par.bubgen_dt
+file.write("set int enable_bubgen_seq {:}\nset double bubgen_t0 {:0.3f}\nset double bubgen_dt {:0.3f}\n"
+           .format(enable_bubgen_seq,bubgen_t0,bubgen_dt))
+
+file.write("set string bubgen_path \"inline\n")
+posx=[lx/2]
+posy=[ly/2]
+rr=[par.r_bubble]
+for i in range(len(rr)):
+        file.write("sphere {:0.3f} {:0.3f} {:0.3f} {:0.3f}\n".format(posx[i],posy[i],0,rr[i]))
+file.write("\"\n")
+
+#generation regions
+gen_ratio=2 #bubble generation ration of different regions
+file.write("set double gen_ratio {:0.3f}\n".format(gen_ratio))
+file.write("set string generation_region \"inline\n")
+region=2
+
+origin_x=par.l-par.lelec
+x0=[origin_x,origin_x] #bottom left corner of rectangle
+y0=[ly/2-par.w/2,ly/2+par.w/2-par.hy] #bottom left corner of rectangle
+z0=[0,0]
+
+lx0=[]
+ly0=[]
+lz0=[]
+for i in range(2):
+        lx0.append(par.lelec)
+        ly0.append(par.hy)
+        lz0.append(par.h)
+
+for i in range(region):
+        file.write("box {:0.3f} {:0.3f} {:0.3f} {:0.3f} {:0.3f} {:0.3f}\n".format(x0[i],y0[i],z0[i],lx0[i],ly0[i],lz0[i]))
+
+file.write("\"\n")
+
+file.write("set int onsurface_generation {:}\n".format(par.onsurface_generation))
+if(par.onsurface_generation):
+        
+        file.write("set string generation_electrode \"inline\n")
+        x0=[par.l-par.lelec*(1+offset/2),par.l-par.lelec*(1+offset/2)]
+        y0=[ly/2-par.w/2,ly/2+par.w/2]
+        z0=[0+offset,0+offset]
+
+        lx0=[par.lelec,par.lelec]
+        ly0=[1e-4,1e-4]
+        lz0=[lz-2*offset,lz-2*offset]
+        
+
+
+        num_electrodes=2
+        for i in range(num_electrodes):
+                file.write("box {:0.3f} {:0.3f} {:0.3f} {:0.3f} {:0.3f} {:0.3f}\n".format(x0[i],y0[i],z0[i],lx0[i],ly0[i],lz0[i]))
+
+
+        file.write("\"\n")
+
+file.write("\nset int n_init_bub {:}\n".format(par.n_init_bub))
+
+file.write("\nset int enable_erasevf 1\n")
+
+file.write("set vect erasevf_rect_x0 {:0.3f} {:0.3f} {:0.3f}\n".format(lx-par.lelec/2.0*offset/2.0,0,0))
+file.write("set vect erasevf_rect_x1 {:0.3f} {:0.3f} {:0.3f}\n".format(lx,inf,inf))
+file.write("set double erasevf_t0 0\n")
+file.write("set double erasevf_per {:0.4f}\n".format(par.bubgen_dt/20.0))
+        
+file.close()
+
+
+##########
+#electrical
+file=open("elec.conf","w")
+
+file.write("set int enable_electro {:}\nset string tracer0_init \"zero\"\nset string tracer1_init \"zero\"\n"
+           .format(par.enable_electro))
+file.write("set double resist1 {:0.5f}\n".format(par.resist1))
+file.write("set double resist2 {:0.5f}\n".format(par.resist2))
+file.write("set double current {:0.5f}\n".format(par._I*1e-3))
+file.close()
+
+
+
+
